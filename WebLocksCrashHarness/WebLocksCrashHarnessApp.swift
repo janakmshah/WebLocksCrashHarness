@@ -198,6 +198,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     @Published var logs: [String] = []
     @Published var iteration: String = ""
     @Published var ready = false
+    @Published var lastMode: String = ""
 
     let osVersion = UIDevice.current.systemVersion
     private let server = LoopbackServer()
@@ -237,6 +238,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
     func run(mode: String) {
         guard ready, server.port != 0 else { return }
         status = .running
+        lastMode = mode
         logs.removeAll()
         iteration = ""
         popups.forEach { $0.removeFromSuperview() }
@@ -276,7 +278,11 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
         case "result":
             if text == "survived" {
                 status = .survived
-                log("RESULT: survived — the bug appears fixed on iOS \(osVersion)")
+                if lastMode == "direct" {
+                    log("RESULT: control survived, as expected — this mode doesn't exercise the crash condition, so it proves nothing about whether the bug is fixed")
+                } else {
+                    log("RESULT: survived — the bug appears fixed on iOS \(osVersion)")
+                }
             } else {
                 log("RESULT: \(text)")
             }
@@ -293,7 +299,11 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         status = .crashed
-        log("RENDERER CRASHED: WebContent process terminated — BUG PRESENT on iOS \(osVersion)")
+        if lastMode == "direct" {
+            log("RENDERER CRASHED in control mode — unexpected, this mode is not supposed to trigger the bug; investigate before trusting a Popup repro result")
+        } else {
+            log("RENDERER CRASHED: WebContent process terminated — BUG PRESENT on iOS \(osVersion)")
+        }
     }
 
     // MARK: WKUIDelegate
@@ -351,27 +361,43 @@ struct ContentView: View {
     @State private var mode = "popup"
     @State private var autoRan = false
 
-    private var bannerColor: Color {
+    private enum BannerKind {
+        case idle, running, crashPresent, crashUnexpectedControl, survivedFixed, survivedControlOnly
+    }
+
+    private var bannerKind: BannerKind {
         switch controller.status {
-        case .idle, .running: return Color(white: 0.9)
-        case .crashed: return Color.red.opacity(0.9)
-        case .survived: return Color.green.opacity(0.85)
+        case .idle: return .idle
+        case .running: return .running
+        case .crashed: return controller.lastMode == "direct" ? .crashUnexpectedControl : .crashPresent
+        case .survived: return controller.lastMode == "direct" ? .survivedControlOnly : .survivedFixed
+        }
+    }
+
+    private var bannerColor: Color {
+        switch bannerKind {
+        case .idle, .running, .survivedControlOnly: return Color(white: 0.9)
+        case .crashPresent: return Color.red.opacity(0.9)
+        case .crashUnexpectedControl: return Color.orange.opacity(0.9)
+        case .survivedFixed: return Color.green.opacity(0.85)
         }
     }
 
     private var bannerText: String {
-        switch controller.status {
+        switch bannerKind {
         case .idle: return "Idle — tap Run"
         case .running: return "Running \(controller.iteration)"
-        case .crashed: return "RENDERER CRASHED — bug present on iOS \(controller.osVersion)"
-        case .survived: return "SURVIVED — bug appears fixed on iOS \(controller.osVersion)"
+        case .crashPresent: return "RENDERER CRASHED — bug present on iOS \(controller.osVersion)"
+        case .crashUnexpectedControl: return "Control mode crashed unexpectedly — investigate before trusting Popup repro"
+        case .survivedFixed: return "SURVIVED — bug appears fixed on iOS \(controller.osVersion)"
+        case .survivedControlOnly: return "Control survived (expected) — run Popup repro for the real verdict"
         }
     }
 
     private var bannerForeground: Color {
-        switch controller.status {
-        case .crashed, .survived: return .white
-        case .idle, .running: return .black
+        switch bannerKind {
+        case .idle, .running, .survivedControlOnly: return .black
+        case .crashPresent, .crashUnexpectedControl, .survivedFixed: return .white
         }
     }
 
